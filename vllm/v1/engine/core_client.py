@@ -909,6 +909,9 @@ class AsyncMPClient(MPClient):
         if request_ids and not self.resources.engine_dead:
             await self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
+    async def abort_all_async(self) -> None:
+        await self.call_utility_async("abort_all")
+
     async def profile_async(self, is_start: bool = True) -> None:
         await self.call_utility_async("profile", is_start)
 

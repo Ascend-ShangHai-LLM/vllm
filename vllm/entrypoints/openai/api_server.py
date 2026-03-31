@@ -984,6 +984,11 @@ if envs.VLLM_SERVER_DEV_MODE:
         }
         return JSONResponse(content=server_info)
 
+    @router.post("/abort_request")
+    async def sleep(raw_request: Request):
+        await engine_client(raw_request).abort_all()
+        return Response(status_code=200)
+
     @router.post("/reset_prefix_cache")
     async def reset_prefix_cache(raw_request: Request):
         """

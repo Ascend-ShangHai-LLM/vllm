@@ -251,6 +251,10 @@ class EngineCore:
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
+    def abort_all(self):
+        for req_id in self.scheduler.requests.keys():
+            self.scheduler.requests[req_id].abort = True
+            
     def execute_model_with_error_logging(
         self,
         model_fn: Callable[[SchedulerOutput], ModelRunnerOutput],

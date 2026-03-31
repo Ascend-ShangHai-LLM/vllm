@@ -66,4 +66,7 @@ def check_stop(request: Request,
         request.status = RequestStatus.FINISHED_STOPPED
         request.stop_reason = last_token_id
         return True
+    if request.abort:
+        request.status = RequestStatus.FINISHED_ABORTED
+        return True
     return False
