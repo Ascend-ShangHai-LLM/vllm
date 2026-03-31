@@ -43,26 +43,31 @@ from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
 
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               RowParallelLinear)
+
 
 class InternS1MultiModalProjector(nn.Module):
 
     def __init__(self, config):
         super().__init__()
+        input_dim = config.vision_config.hidden_size * int(1 / config.downsample_ratio)**2
         self.layer_norm = nn.LayerNorm(config.vision_config.hidden_size *
                                        int(1 / config.downsample_ratio)**2)
-        self.linear_1 = nn.Linear(
-            config.vision_config.hidden_size *
-            int(1 / config.downsample_ratio)**2,
-            config.text_config.hidden_size)
+        
+        self.linear_1 = ColumnParallelLinear(input_dim,
+                                        config.text_config.hidden_size,
+                                        bias=True)
         self.act = ACT2FN[config.projector_hidden_act]
-        self.linear_2 = nn.Linear(config.text_config.hidden_size,
-                                  config.text_config.hidden_size)
+        self.linear_2 = RowParallelLinear(config.text_config.hidden_size,
+                                     config.text_config.hidden_size,
+                                     bias=True)
 
     def forward(self, image_features):
         hidden_states = self.layer_norm(image_features)
-        hidden_states = self.linear_1(hidden_states)
+        hidden_states, _ = self.linear_1(hidden_states)
         hidden_states = self.act(hidden_states)
-        hidden_states = self.linear_2(hidden_states)
+        hidden_states, _ = self.linear_2(hidden_states)
         return hidden_states
 
 
@@ -547,6 +552,9 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
+        self.vision_feature_layer = config.vision_feature_layer
+        self.vision_feature_select_strategy = config.vision_feature_select_strategy
+
     def _init_vision_model(
         self,
         config: PretrainedConfig,
@@ -577,8 +585,15 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
         return x
 
     def extract_feature(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        vit_embeds = self.vision_tower(pixel_values=pixel_values)
-        vit_embeds = vit_embeds[:, 1:, :]
+        vit_embeds, last_vit_embeds = self.vision_tower(pixel_values=pixel_values)
+
+        if self.vision_feature_layer == -1:
+            vit_embeds = last_vit_embeds
+        else:
+            vit_embeds = vit_embeds[self.vision_feature_layer]
+        
+        if self.vision_feature_select_strategy == 'default':
+            vit_embeds = vit_embeds[:, 1:, :]
 
         h = w = int(vit_embeds.shape[1]**0.5)
         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
