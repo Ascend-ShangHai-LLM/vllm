@@ -169,13 +169,19 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 ray_remote_kwargs)
 
         logger.info("use_ray_spmd_worker: %s", self.use_ray_spmd_worker)
-
+        local_dp_rank = self.parallel_config.data_parallel_rank_local
+        world_size = self.parallel_config.world_size
         # Create the workers.
         bundle_indices: List[int]
         if envs.VLLM_RAY_BUNDLE_INDICES:
             # Use the bundle indices specified by the user.
             bundle_indices = list(
                 map(int, envs.VLLM_RAY_BUNDLE_INDICES.split(",")))
+            
+
+            # this is special handle for xtuner.
+            if len(bundle_indices) >= self.parallel_config.world_size:
+                bundle_indices = bundle_indices[local_dp_rank * world_size:(local_dp_rank + 1) * world_size]
             assert len(bundle_indices) == self.parallel_config.world_size, \
             ("VLLM_RAY_BUNDLE_INDICES must have the same size"
             f" as the world size, but got {bundle_indices=} "
