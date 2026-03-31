@@ -948,6 +948,14 @@ def update_environment_variables(envs: dict[str, str]):
                 "Overwriting environment variable %s "
                 "from '%s' to '%s'", k, os.environ[k], v)
         os.environ[k] = v
+    if "PYTORCH_NPU_ALLOC_CONF" in envs:
+        logger.info(f'PYTORCH_NPU_ALLOC_CONF in envs')
+        envs.pop("PYTORCH_NPU_ALLOC_CONF")
+
+    if "PYTORCH_NPU_ALLOC_CONF" in os.environ:
+        logger.info(f'PYTORCH_NPU_ALLOC_CONF in os.environ')
+        del os.environ["PYTORCH_NPU_ALLOC_CONF"]
+    logger.info(f'envs for worker are {os.environ}')
 
 
 def chunk_list(lst: list[T], chunk_size: int):
