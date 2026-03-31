@@ -445,6 +445,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     stream_options: Optional[StreamOptions] = None
     temperature: Optional[float] = None
     top_p: Optional[float] = None
+    input_ids: Optional[list[int]] = None
     tools: Optional[list[ChatCompletionToolsParam]] = None
     tool_choice: Optional[Union[
         Literal["none"],

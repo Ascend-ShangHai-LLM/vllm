@@ -1885,6 +1885,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             token_ids,
             mm_prompt_updates,
         )
+        
+        import os
+        if os.getenv("USE_TOKEN_IN", "0") == "1":
+            new_token_ids = token_ids
 
         # If the search text does not represent a special token,
         # it may have different token IDs in the prompt, because

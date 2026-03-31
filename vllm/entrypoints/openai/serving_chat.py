@@ -274,6 +274,8 @@ class OpenAIServingChat(OpenAIServing):
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
+                if request.input_ids is not None:
+                    engine_prompt["prompt_token_ids"] = request.input_ids
                 sampling_params: Union[SamplingParams, BeamSearchParams]
 
                 if self.default_sampling_params is None:
@@ -316,6 +318,7 @@ class OpenAIServingChat(OpenAIServing):
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
+                        input_ids=request.input_ids
                     )
 
                 generators.append(generator)

@@ -334,6 +334,7 @@ class Processor:
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
+        input_ids: Optional[list[int]] = None,
     ) -> tuple[Optional[str], EngineCoreRequest]:
 
         # TODO(woosuk): Support pooling models.
@@ -399,6 +400,8 @@ class Processor:
             "type"] == "embeds" else decoder_inputs.get("prompt")
         prompt_token_ids = decoder_inputs[
             "prompt_token_ids"] if decoder_inputs["type"] != "embeds" else None
+        if input_ids is not None:
+            prompt_token_ids = input_ids
         prompt_embeds = decoder_inputs["prompt_embeds"] if decoder_inputs[
             "type"] == "embeds" else None
 
