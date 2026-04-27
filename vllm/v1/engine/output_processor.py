@@ -273,7 +273,7 @@ class RequestState:
         finish_reason: FinishReason | None,
         stop_reason: int | str | None,
         kv_transfer_params: dict[str, Any] | None = None,
-        routed_experts: np.ndarray | None = None,
+        routed_experts: list[list[list[int]]] | None = None,
     ) -> RequestOutput | PoolingRequestOutput | None:
         finished = finish_reason is not None
         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
@@ -378,7 +378,7 @@ class RequestState:
         token_ids: list[int],
         finish_reason: FinishReason | None,
         stop_reason: int | str | None,
-        routed_experts: np.ndarray | None = None,
+        routed_experts: list[list[list[int]]] | None = None,
     ) -> CompletionOutput:
         assert self.detokenizer is not None
         assert self.logprobs_processor is not None
@@ -429,6 +429,7 @@ class OutputProcessor:
         self.external_req_ids: defaultdict[str, list[str]] = defaultdict(list)
         self.lora_states = LoRARequestStates(log_stats)
         self.tracing_enabled = tracing_enabled
+        self.routed_buffer: dict[str, list[list[list[int]]]] = {}
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
@@ -619,6 +620,18 @@ class OutputProcessor:
             routed_experts = engine_core_output.routed_experts
             req_state.num_cached_tokens = engine_core_output.num_cached_tokens
             req_state.is_prefilling = False
+            num_computed_tokens = engine_core_output.num_computed_tokens
+            
+            if routed_experts is not None:
+                if req_id in self.routed_buffer:
+                    self.routed_buffer[req_id].extend(routed_experts)
+                else:
+                    self.routed_buffer[req_id] = routed_experts
+
+            if req_id in self.routed_buffer:
+                assert num_computed_tokens <= len(self.routed_buffer[req_id]), f"num_computed_tokens {num_computed_tokens}, len(self.routed_buffer[req_id]) {len(self.routed_buffer[req_id])}"
+                if num_computed_tokens is not None and num_computed_tokens < len(self.routed_buffer[req_id]):
+                    self.routed_buffer[req_id] = self.routed_buffer[req_id][-num_computed_tokens:]
 
             if pooling_output is None:
                 assert req_state.detokenizer is not None
@@ -642,7 +655,7 @@ class OutputProcessor:
                 finish_reason,
                 stop_reason,
                 kv_transfer_params,
-                routed_experts,
+                self.routed_buffer.get(req_id),
             ):
                 if req_state.streaming_input:
                     request_output.finished = False
@@ -656,6 +669,7 @@ class OutputProcessor:
 
             # Free completed requests.
             if finish_reason is not None:
+                self.routed_buffer.pop(req_id, None)
                 if req_state.streaming_input:
                     if req_state.input_chunk_queue:
                         update = req_state.input_chunk_queue.popleft()

@@ -161,7 +161,8 @@ class EngineCoreOutput(
     num_cached_tokens: int = 0
     # The number of tokens computed remotely (original count from connector).
     num_external_computed_tokens: int = 0
-    routed_experts: np.ndarray | None = None
+    routed_experts: list[list[list[int]]] | None = None
+    num_computed_tokens: int = 0
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0

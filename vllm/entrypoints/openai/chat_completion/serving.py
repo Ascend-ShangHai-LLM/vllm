@@ -1570,6 +1570,7 @@ class OpenAIServingChat(OpenAIServing):
                 token_ids=(
                     as_list(output.token_ids) if request.return_token_ids else None
                 ),
+                routed_experts = output.routed_experts if output.routed_experts is not None else None,
             )
             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 
