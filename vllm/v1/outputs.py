@@ -252,6 +252,8 @@ class ModelRunnerOutput:
 
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
+    
+    routed_experts: list[list[list[int]]] | None = None
 
 
 # ModelRunnerOutput wrapper for async scheduling.

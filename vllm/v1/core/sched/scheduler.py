@@ -27,9 +27,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
-    RoutedExpertsReader,
-)
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.v1.core.encoder_cache_manager import (
@@ -247,41 +244,7 @@ class Scheduler(SchedulerInterface):
             self.perf_metrics = ModelMetrics(vllm_config)
 
         if self.vllm_config.model_config.enable_return_routed_experts:
-            assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
-                "enable_return_routed_experts does not support context parallelism "
-                "(dcp_world_size > 1 or pcp_world_size > 1)"
-            )
-
-            self.routed_experts_reader = RoutedExpertsReader.create()
-
-            assert len(kv_cache_config.kv_cache_groups) > 0, (
-                "enable_return_routed_experts requires at least one kv cache group"
-            )
-            # Find the attention group for routed experts indexing.
-            self.routed_experts_attn_gid = 0
-            for gid, group in enumerate(kv_cache_config.kv_cache_groups):
-                if isinstance(group.kv_cache_spec, AttentionSpec):
-                    self.routed_experts_attn_gid = gid
-                    break
-            min_block_size = min(
-                [
-                    group.kv_cache_spec.block_size
-                    for group in kv_cache_config.kv_cache_groups
-                ]
-            )
-            num_groups = len(kv_cache_config.kv_cache_groups)
-            self.max_num_kv_tokens = (
-                kv_cache_config.num_blocks // num_groups
-            ) * min_block_size
-            dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
-            pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
-            if pcp_size * dcp_size > 1:
-                self.max_num_kv_tokens *= pcp_size * dcp_size
-
-            self.routed_experts_reader.attach_buffer(
-                max_num_kv_tokens=self.max_num_kv_tokens,
-                vllm_config=self.vllm_config,
-            )
+            self.routed_buffer = {}
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
@@ -1285,6 +1248,7 @@ class Scheduler(SchedulerInterface):
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
+        routed_experts_all = model_runner_output.routed_experts
 
         perf_stats: PerfStats | None = None
         if self.perf_metrics and self.perf_metrics.is_enabled():
@@ -1314,6 +1278,8 @@ class Scheduler(SchedulerInterface):
         # to avoid expensive operations inside the loop.
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
+        routed_index_mapping = {model_runner_output.req_id_to_index[req_id]:num_tokens_scheduled for req_id, num_tokens_scheduled in num_scheduled_tokens.items()}
+        routed_index_mapping = list(dict(sorted(routed_index_mapping.items(), key=lambda x: x[0])).values())
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
@@ -1379,10 +1345,17 @@ class Scheduler(SchedulerInterface):
                 stopped = True
 
             routed_experts = None
+            if routed_experts_all is not None:
+                routed_start_idx = sum(routed_index_mapping[:req_index])
+                routed_end_idx = routed_start_idx + routed_index_mapping[req_index]
+                routed_experts = routed_experts_all[routed_start_idx:routed_end_idx]
+                if req_id in self.routed_buffer:
+                    self.routed_buffer[req_id].extend(routed_experts)
+                else:
+                    self.routed_buffer[req_id] = routed_experts
+
             finish_reason = None
             if stopped:
-                routed_experts = self._get_routed_experts(request)
-
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
                 # reset the status to WAITING for streaming requests that continue.
                 finish_reason = request.get_finished_reason()
@@ -1441,8 +1414,9 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
                         num_external_computed_tokens=request.num_external_computed_tokens,
-                        routed_experts=routed_experts,
+                        routed_experts=self.routed_buffer.pop(req_id) if self.vllm_config.model_config.enable_return_routed_experts else None,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        num_computed_tokens = request.num_computed_tokens,
                     )
                 )
             else:
@@ -1570,31 +1544,6 @@ class Scheduler(SchedulerInterface):
 
         self._enqueue_waiting_request(request)
         return False
-
-    def _get_routed_experts(self, request: Request) -> np.ndarray | None:
-        if not self.vllm_config.model_config.enable_return_routed_experts:
-            return None
-
-        kv_blocks = self.kv_cache_manager.get_blocks(request.request_id)
-        block_ids = kv_blocks.get_block_ids()[self.routed_experts_attn_gid]
-        num_tokens = request.num_tokens - 1
-
-        # compute slot mapping using attention group's block_size
-        block_ids_array = np.array(block_ids, dtype=np.int32)
-        num_blocks = len(block_ids)
-        attn_group = self.kv_cache_config.kv_cache_groups[self.routed_experts_attn_gid]
-        block_size = attn_group.kv_cache_spec.block_size
-
-        # generate block offsets
-        block_offsets = np.arange(0, block_size)
-
-        # compute slot mapping: slot = block_id * block_size + offset
-        slot_mapping = (
-            block_offsets.reshape((1, block_size))
-            + block_ids_array.reshape((num_blocks, 1)) * block_size
-        ).flatten()[:num_tokens]
-
-        return self.routed_experts_reader.get_routed_experts(indices=slot_mapping)
 
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int]
@@ -1784,6 +1733,7 @@ class Scheduler(SchedulerInterface):
 
             request.status = finished_status
             self._free_request(request, delay_free_blocks=delay_free_blocks)
+            self.routed_buffer.pop(request.request_id, None)
 
         return [(r.request_id, r.client_index) for r in valid_requests]
 
