@@ -534,6 +534,7 @@ class OpenAIServingRender:
                 for k in ("mm_processor_kwargs", "cache_salt")
                 if (v := getattr(request, k, None)) is not None
             },
+            input_ids = request.input_ids,
         )
 
         # tool parsing is done only if a tool_parser has been set and if

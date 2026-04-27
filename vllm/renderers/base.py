@@ -799,6 +799,7 @@ class BaseRenderer(ABC, Generic[_T]):
         conversations: Sequence[list["ChatCompletionMessageParam"]],
         chat_params: ChatParams,
         tok_params: TokenizeParams | None = None,
+        input_ids = None,
         *,
         prompt_extras: dict[str, Any] | None = None,
     ):
@@ -821,6 +822,10 @@ class BaseRenderer(ABC, Generic[_T]):
         tok_prompts = await self.tokenize_prompts_async(dict_prompts, tok_params)
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
+        
+        if input_ids is not None:
+            assert len(tok_prompts) == 1
+            tok_prompts[0]["prompt_token_ids"] = input_ids
 
         eng_prompts = [
             self.process_for_engine(prompt, arrival_time) for prompt in tok_prompts
