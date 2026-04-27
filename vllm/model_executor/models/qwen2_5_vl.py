@@ -119,6 +119,25 @@ logger = init_logger(__name__)
 
 # === Vision Inputs === #
 
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_rotary_pos_emb_vision(
+    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    orig_q_dtype = q.dtype
+    orig_k_dtype = k.dtype
+    q, k = q.float(), k.float()
+    cos, sin = cos.unsqueeze(-2).float(), sin.unsqueeze(-2).float()
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    q_embed = q_embed.to(orig_q_dtype)
+    k_embed = k_embed.to(orig_k_dtype)
+    return q_embed, k_embed
 
 class Qwen2_5_VLImagePixelInputs(TensorSchema):
     """
@@ -369,38 +388,49 @@ class Qwen2_5_VisionAttention(nn.Module):
         sequence_lengths: torch.Tensor,  # Only used for FlashInfer CuDNN backend
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
+        # x, _ = self.qkv(x)
+        # seq_len, batch_size, _ = x.shape
+
+        # qkv = einops.rearrange(
+        #     x,
+        #     "s b (three head head_dim) -> b s three head head_dim",
+        #     three=3,
+        #     head=self.num_attention_heads_per_partition,
+        # )
+
+        # if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
+        #     qk, v = qkv[:, :, :2], qkv[:, :, 2]
+
+        #     qk_reshaped = einops.rearrange(
+        #         qk, "b s two head head_dim -> (two b) s head head_dim", two=2
+        #     )
+        #     qk_reshaped = qk_reshaped.contiguous()
+        #     qk_rotated = self.apply_rotary_emb(
+        #         qk_reshaped,
+        #         rotary_pos_emb_cos,
+        #         rotary_pos_emb_sin,
+        #     )
+        #     qk_rotated = qk_rotated.view(
+        #         2,
+        #         batch_size,
+        #         seq_len,
+        #         self.num_attention_heads_per_partition,
+        #         self.hidden_size_per_attention_head,
+        #     )
+        #     q, k = qk_rotated.unbind(dim=0)
+        # else:
+        #     q, k, v = qkv.unbind(dim=2)
+        
+        cos = rotary_pos_emb_cos
+        sin = rotary_pos_emb_sin
+        seq_length = x.shape[0]
         x, _ = self.qkv(x)
-        seq_len, batch_size, _ = x.shape
-
-        qkv = einops.rearrange(
-            x,
-            "s b (three head head_dim) -> b s three head head_dim",
-            three=3,
-            head=self.num_attention_heads_per_partition,
+        q, k, v = (
+            x.reshape(seq_length, 3, self.num_attention_heads_per_partition, -1).permute(1, 0, 2, 3).unbind(0)
         )
-
+        
         if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
-            qk, v = qkv[:, :, :2], qkv[:, :, 2]
-
-            qk_reshaped = einops.rearrange(
-                qk, "b s two head head_dim -> (two b) s head head_dim", two=2
-            )
-            qk_reshaped = qk_reshaped.contiguous()
-            qk_rotated = self.apply_rotary_emb(
-                qk_reshaped,
-                rotary_pos_emb_cos,
-                rotary_pos_emb_sin,
-            )
-            qk_rotated = qk_rotated.view(
-                2,
-                batch_size,
-                seq_len,
-                self.num_attention_heads_per_partition,
-                self.hidden_size_per_attention_head,
-            )
-            q, k = qk_rotated.unbind(dim=0)
-        else:
-            q, k, v = qkv.unbind(dim=2)
+            q, k = apply_rotary_pos_emb_vision(q, k, cos, sin)
 
         context_layer = self.attn(
             query=q,
@@ -411,10 +441,15 @@ class Qwen2_5_VisionAttention(nn.Module):
             sequence_lengths=sequence_lengths,
         )
 
-        context_layer = einops.rearrange(
-            context_layer, "b s h d -> s b (h d)", b=batch_size
-        ).contiguous()
+        q = q.transpose(0, 1).unsqueeze(0)
+        k = k.transpose(0, 1).unsqueeze(0)
+        v = v.transpose(0, 1).unsqueeze(0)
 
+        # context_layer = einops.rearrange(
+        #     context_layer, "b s h d -> s b (h d)", b=batch_size
+        # ).contiguous()
+        context_layer = context_layer.reshape(seq_length, -1).contiguous()
+        
         output, _ = self.proj(context_layer)
         return output
 

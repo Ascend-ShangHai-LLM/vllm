@@ -450,23 +450,61 @@ class Qwen3_VisionTransformer(nn.Module):
 
         return torch.from_numpy(np.stack([hpos_ids, wpos_ids], axis=-1))
 
-    def rot_pos_emb(self, grid_thw: list[list[int]]):
-        max_grid_size = max(max(h, w) for _, h, w in grid_thw)
-        pos_ids = [
-            self.rot_pos_ids(h, w, self.spatial_merge_size)
-            if t == 1
-            else self.rot_pos_ids(h, w, self.spatial_merge_size).repeat(t, 1)
-            for t, h, w in grid_thw
-        ]
-        pos_ids = torch.cat(pos_ids, dim=0).to(self.device, non_blocking=True)
+    def rot_pos_emb(self, grid_thw: torch.Tensor):
+        merge_size = self.spatial_merge_size
 
-        # Use pre-computed cos_sin_cache from RotaryEmbedding
-        cos, sin = self.rotary_pos_emb.get_cos_sin(max_grid_size)
+        max_hw = int(grid_thw[:, 1:].max().item())
+        freq_table = self.rotary_pos_emb.get_freq_table(max_hw, self.device)  # (max_hw, dim // 2)
+        device = freq_table.device
 
-        cos_combined = cos[pos_ids].flatten(1)
-        sin_combined = sin[pos_ids].flatten(1)
+        total_tokens = int(torch.prod(grid_thw, dim=1).sum().item())
+        pos_ids = torch.empty((total_tokens, 2), dtype=torch.long, device=device)
 
-        return cos_combined, sin_combined
+        offset = 0
+        for num_frames, height, width in grid_thw:
+            merged_h, merged_w = height // merge_size, width // merge_size
+
+            block_rows = torch.arange(merged_h, device=device)  # block row indices
+            block_cols = torch.arange(merged_w, device=device)  # block col indices
+            intra_row = torch.arange(merge_size, device=device)  # intra-block row offsets
+            intra_col = torch.arange(merge_size, device=device)  # intra-block col offsets
+
+            # Compute full-resolution positions
+            row_idx = block_rows[:, None, None, None] * merge_size + intra_row[None, None, :, None]
+            col_idx = block_cols[None, :, None, None] * merge_size + intra_col[None, None, None, :]
+
+            row_idx = row_idx.expand(merged_h, merged_w, merge_size, merge_size).reshape(-1)
+            col_idx = col_idx.expand(merged_h, merged_w, merge_size, merge_size).reshape(-1)
+
+            coords = torch.stack((row_idx, col_idx), dim=-1)
+
+            if num_frames > 1:
+                coords = coords.repeat(num_frames, 1)
+
+            num_tokens = coords.shape[0]
+            pos_ids[offset : offset + num_tokens] = coords
+            offset += num_tokens
+        embeddings = freq_table[pos_ids]  # lookup rotary embeddings
+        embeddings = embeddings.flatten(1)
+        return embeddings
+    
+    # def rot_pos_emb(self, grid_thw: list[list[int]]):
+    #     max_grid_size = max(max(h, w) for _, h, w in grid_thw)
+    #     pos_ids = [
+    #         self.rot_pos_ids(h, w, self.spatial_merge_size)
+    #         if t == 1
+    #         else self.rot_pos_ids(h, w, self.spatial_merge_size).repeat(t, 1)
+    #         for t, h, w in grid_thw
+    #     ]
+    #     pos_ids = torch.cat(pos_ids, dim=0).to(self.device, non_blocking=True)
+
+    #     # Use pre-computed cos_sin_cache from RotaryEmbedding
+    #     cos, sin = self.rotary_pos_emb.get_cos_sin(max_grid_size)
+
+    #     cos_combined = cos[pos_ids].flatten(1)
+    #     sin_combined = sin[pos_ids].flatten(1)
+
+    #     return cos_combined, sin_combined
 
     def fast_pos_embed_interpolate(self, grid_thw: list[list[int]]) -> torch.Tensor:
         num_grid_per_side = self.num_grid_per_side
@@ -545,27 +583,46 @@ class Qwen3_VisionTransformer(nn.Module):
 
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw_list)
         hidden_states = hidden_states + pos_embeds
-        rotary_pos_emb_cos, rotary_pos_emb_sin = self.rot_pos_emb(grid_thw_list)
+        # rotary_pos_emb_cos, rotary_pos_emb_sin = self.rot_pos_emb(grid_thw_list)
+        grid_thw = torch.tensor(grid_thw_list)
+        rotary_pos_emb = self.rot_pos_emb(grid_thw)
 
-        cu_seqlens = np.repeat(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
-            axis=0, dtype=np.int32
-        )
-        cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
-        sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
-            self.attn_backend, cu_seqlens, self.device
-        )
-        max_seqlen = torch.tensor(
-            MMEncoderAttention.compute_max_seqlen(self.attn_backend, cu_seqlens),
+        # cu_seqlens = np.repeat(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
+        #     axis=0, dtype=np.int32
+        # )
+        # cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
+        # sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
+        #     self.attn_backend, cu_seqlens, self.device
+        # )
+        # max_seqlen = torch.tensor(
+        #     MMEncoderAttention.compute_max_seqlen(self.attn_backend, cu_seqlens),
+        #     dtype=torch.int32,
+        # )
+        # cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
+        #     self.attn_backend,
+        #     cu_seqlens,
+        #     self.hidden_size,
+        #     self.tp_size,
+        #     self.device,
+        # )
+        # hidden_states = hidden_states.unsqueeze(1)
+        
+        sequence_lengths = None
+
+        cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
+            dim=0,
             dtype=torch.int32,
         )
-        cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
-            self.attn_backend,
-            cu_seqlens,
-            self.hidden_size,
-            self.tp_size,
-            self.device,
-        )
-        hidden_states = hidden_states.unsqueeze(1)
+        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+
+        
+        seq_len, _ = hidden_states.size()
+        hidden_states = hidden_states.reshape(seq_len, -1)
+        rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
+        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1).to(hidden_states.device)
+        rotary_pos_emb_cos = emb.cos()
+        rotary_pos_emb_sin = emb.sin()
 
         deepstack_feature_lists = []
         for layer_num, blk in enumerate(self.blocks):

@@ -1087,14 +1087,26 @@ class Qwen3NextAttention(nn.Module):
         )
         self.attn_output_gate = getattr(config, "attn_output_gate", True)
 
-        self.qkv_proj = QKVParallelLinear(
+        self.q_proj = ColumnParallelLinear(
             config.hidden_size,
-            self.head_dim,
-            self.total_num_heads * (1 + self.attn_output_gate),
-            self.total_num_kv_heads,
+            self.total_num_heads * (1 + self.attn_output_gate) * self.head_dim,
             bias=getattr(config, "qkv_bias", False),
             quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
+            prefix=f"{prefix}.q_proj",
+        )
+        self.k_proj = ColumnParallelLinear(
+            self.hidden_size,
+            self.total_num_kv_heads * self.head_dim,
+            bias=getattr(config, "qkv_bias", False),
+            quant_config=quant_config,
+            prefix=f"{prefix}.k_proj",
+        )
+        self.v_proj = ColumnParallelLinear(
+            self.hidden_size,
+            self.total_num_kv_heads * self.head_dim,
+            bias=getattr(config, "qkv_bias", False),
+            quant_config=quant_config,
+            prefix=f"{prefix}.v_proj",
         )
 
         self.o_proj = RowParallelLinear(
@@ -1412,9 +1424,9 @@ class Qwen3NextModel(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
+            # ("qkv_proj", "q_proj", "q"),
+            # ("qkv_proj", "k_proj", "k"),
+            # ("qkv_proj", "v_proj", "v"),
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
@@ -1555,11 +1567,11 @@ class Qwen3NextForCausalLM(
     IsHybrid,
 ):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
+        # "qkv_proj": [
+        #     "q_proj",
+        #     "k_proj",
+        #     "v_proj",
+        # ],
         "gate_up_proj": ["gate_proj", "up_proj"],
         "in_proj_qkvz": ["in_proj_qkvz"],
         "in_proj_ba": ["in_proj_ba"],

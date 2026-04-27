@@ -65,6 +65,9 @@ class RotaryEmbeddingBase(CustomOp):
         self.apply_rotary_emb = ApplyRotaryEmb(
             is_neox_style=self.is_neox_style,
         )
+        
+        inv_freq = 1.0 / (self.base ** (torch.arange(0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def _compute_inv_freq(self, base: float) -> torch.Tensor:
         """Compute the inverse frequency."""
@@ -113,6 +116,11 @@ class RotaryEmbeddingBase(CustomOp):
         cos_sin = self.cos_sin_cache[:seqlen]
         cos, sin = cos_sin.chunk(2, dim=-1)
         return cos, sin
+    
+    def get_freq_table(self, seqlen: int, device) -> torch.Tensor:
+        seq = torch.arange(seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+        freqs = torch.outer(seq, self.inv_freq).to(device)
+        return freqs
 
 
 class RotaryEmbedding(RotaryEmbeddingBase):
