@@ -183,6 +183,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
     include_reasoning: bool = True
     parallel_tool_calls: bool | None = True
+    input_ids: list[int] | None = None
 
     # NOTE this will be ignored by vLLM
     user: str | None = None
