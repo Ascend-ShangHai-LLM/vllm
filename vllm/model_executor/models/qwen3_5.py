@@ -386,9 +386,9 @@ class Qwen3_5Model(Qwen3NextModel):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             # self attention
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
+            # ("qkv_proj", "q_proj", "q"),
+            # ("qkv_proj", "k_proj", "k"),
+            # ("qkv_proj", "v_proj", "v"),
             # mlp
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
@@ -544,11 +544,11 @@ class Qwen3_5ForCausalLMBase(
     SupportsPP,
 ):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
+        # "qkv_proj": [
+        #     "q_proj",
+        #     "k_proj",
+        #     "v_proj",
+        # ],
         "gate_up_proj": ["gate_proj", "up_proj"],
         # GDN fused projections.
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
@@ -584,6 +584,7 @@ class Qwen3_5ForCausalLMBase(
                     config.vocab_size,
                     config.hidden_size,
                     prefix=maybe_prefix(prefix, "lm_head"),
+                    params_dtype=torch.float32,
                 )
         else:
             self.lm_head = PPMissingLayer()
