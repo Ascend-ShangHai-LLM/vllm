@@ -6404,10 +6404,14 @@ class GPUModelRunner(
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_extract_hidden_states()
         ):
-            assert isinstance(
-                self.drafter,
-                EagleProposer | DFlashProposer | ExtractHiddenStatesProposer,
-            )
+            # NOTE: Platform plugins (e.g. Ascend) may provide custom drafters
+            # that don't inherit from the upstream proposer classes, but still
+            # implement the same interface.
+            if not hasattr(self.drafter, "initialize_cudagraph_keys"):
+                raise TypeError(
+                    "Spec decode drafter must implement initialize_cudagraph_keys; "
+                    f"got drafter={type(self.drafter)}"
+                )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
     def calculate_reorder_batch_threshold(self) -> None:

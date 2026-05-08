@@ -2,11 +2,38 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import ALLOWED_LAYER_TYPES, PretrainedConfig
 
 
 class Step3p5Config(PretrainedConfig):
     model_type = "step3p5"
+
+    def validate_layer_type(self) -> None:
+        """HF assumes ``len(layer_types) == num_hidden_layers``; Step3.5 MTP checkpoints
+        append ``num_nextn_predict_layers`` extra entries for MTP blocks."""
+        if not (
+            getattr(self, "layer_types", None) is not None
+            and hasattr(self, "num_hidden_layers")
+        ):
+            return
+        if not all(layer_type in ALLOWED_LAYER_TYPES for layer_type in self.layer_types):
+            raise ValueError(
+                f"The `layer_types` entries must be in {ALLOWED_LAYER_TYPES} "
+                f"but got {self.layer_types}"
+            )
+        n = self.num_hidden_layers
+        if n is None:
+            return
+        num_mtp = int(getattr(self, "num_nextn_predict_layers", 0) or 0)
+        length = len(self.layer_types)
+        if length == n:
+            return
+        if num_mtp > 0 and length == n + num_mtp:
+            return
+        raise ValueError(
+            f"`num_hidden_layers` ({n}) must match len(layer_types) ({length}), "
+            f"or with num_nextn_predict_layers={num_mtp} expect length {n + num_mtp}."
+        )
 
     def __init__(
         self,
@@ -80,10 +107,29 @@ class Step3p5Config(PretrainedConfig):
 
         self.att_impl_type = att_impl_type
         self.use_head_wise_attn_gate = use_head_wise_attn_gate
-        # For some reason the checkpoint has longer layer_types than num_hidden_layers
+        # Checkpoints may append MTP block entries after the main transformer layers:
+        # indices [0, num_hidden_layers) are backbone; [num_hidden_layers,
+        # num_hidden_layers + num_nextn_predict_layers) are MTP (see step3p5_mtp.py).
+        # Only strip trailing junk if the list is longer than that logical span.
+        layer_types_extended_for_restore: list[str] | None = None
         if layer_types is not None:
-            layer_types = layer_types[: self.num_hidden_layers]
-        self.layer_types = layer_types
+            max_entries = num_hidden_layers + num_nextn_predict_layers
+            if len(layer_types) > max_entries:
+                layer_types = layer_types[:max_entries]
+            num_mtp = num_nextn_predict_layers
+            if (
+                num_mtp > 0
+                and len(layer_types) == num_hidden_layers + num_mtp
+            ):
+                # PreTrainedConfig.validate runs inside super().__init__ and always uses
+                # the parent's validate_layer_type (expects len(layer_types)==num_hidden_layers).
+                # Temporarily expose only backbone entries during super(); restore below.
+                layer_types_extended_for_restore = list(layer_types)
+                self.layer_types = layer_types[:num_hidden_layers]
+            else:
+                self.layer_types = layer_types
+        else:
+            self.layer_types = None
         self.use_rope_layers = use_rope_layers
         self.yarn_only_types = yarn_only_types
         self.attention_other_setting = attention_other_setting
@@ -101,3 +147,22 @@ class Step3p5Config(PretrainedConfig):
             eos_token_id=resolved_eos_token_id,
             **kwargs,
         )
+        if layer_types_extended_for_restore is not None:
+            self.layer_types = layer_types_extended_for_restore
+
+# `huggingface_hub` @strict on `PreTrainedConfig` copies `__class_validators__` from
+# the parent, so `validate_layer_type` still points at the base implementation and
+# never calls the override above. Replace that entry for this model class only.
+def _register_step3p5_layer_type_validator() -> None:
+    parents = getattr(Step3p5Config, "__class_validators__", None)
+    if not parents:
+        return
+    Step3p5Config.__class_validators__ = tuple(  # type: ignore[misc]
+        Step3p5Config.validate_layer_type
+        if getattr(v, "__name__", None) == "validate_layer_type"
+        else v
+        for v in parents
+    )
+
+
+_register_step3p5_layer_type_validator()
