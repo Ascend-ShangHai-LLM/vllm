@@ -274,6 +274,7 @@ class RequestState:
         stop_reason: int | str | None,
         kv_transfer_params: dict[str, Any] | None = None,
         routed_experts: np.ndarray | None = None,
+        entropy: list[float] | None = None,
     ) -> RequestOutput | PoolingRequestOutput | None:
         finished = finish_reason is not None
         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
@@ -315,7 +316,7 @@ class RequestState:
             )
 
         output = self._new_completion_output(
-            new_token_ids, finish_reason, stop_reason, routed_experts
+            new_token_ids, finish_reason, stop_reason, routed_experts, entropy
         )
 
         if self.parent_req is None:
@@ -379,6 +380,7 @@ class RequestState:
         finish_reason: FinishReason | None,
         stop_reason: int | str | None,
         routed_experts: np.ndarray | None = None,
+        entropy: list[float] | None = None,
     ) -> CompletionOutput:
         assert self.detokenizer is not None
         assert self.logprobs_processor is not None
@@ -404,6 +406,7 @@ class RequestState:
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None,
+            entropy=entropy,
         )
 
     def _new_pooling_output(self, pooling_output: torch.Tensor) -> PoolingOutput:
@@ -429,6 +432,7 @@ class OutputProcessor:
         self.external_req_ids: defaultdict[str, list[str]] = defaultdict(list)
         self.lora_states = LoRARequestStates(log_stats)
         self.tracing_enabled = tracing_enabled
+        self.entropy_dict: dict[str, list[float]] = {}
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
@@ -619,6 +623,17 @@ class OutputProcessor:
             routed_experts = engine_core_output.routed_experts
             req_state.num_cached_tokens = engine_core_output.num_cached_tokens
             req_state.is_prefilling = False
+            
+            entropy = engine_core_output.entropy
+            
+            if entropy is not None:
+                entropy = entropy.tolist()
+                if not isinstance(entropy, list):
+                    entropy = [entropy]
+                if req_id in self.entropy_dict:
+                    self.entropy_dict[req_id].extend(entropy)
+                else:
+                    self.entropy_dict[req_id] = entropy
 
             if pooling_output is None:
                 assert req_state.detokenizer is not None
@@ -643,6 +658,7 @@ class OutputProcessor:
                 stop_reason,
                 kv_transfer_params,
                 routed_experts,
+                self.entropy_dict.get(req_id),
             ):
                 if req_state.streaming_input:
                     request_output.finished = False
@@ -656,6 +672,9 @@ class OutputProcessor:
 
             # Free completed requests.
             if finish_reason is not None:
+                import os
+                if os.getenv("RETURN_ENTROPY", "0") == "1":
+                    self.entropy_dict.pop(req_id, None)
                 if req_state.streaming_input:
                     if req_state.input_chunk_queue:
                         update = req_state.input_chunk_queue.popleft()

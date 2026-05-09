@@ -1356,6 +1356,8 @@ class OpenAIServingChat(OpenAIServing):
                         content=content,
                     )
 
+                entropy = output.entropy
+                
                 choice_data = ChatCompletionResponseChoice(
                     index=output.index,
                     message=message,
@@ -1371,6 +1373,7 @@ class OpenAIServingChat(OpenAIServing):
                     token_ids=(
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
+                    entropy=entropy,
                 )
                 choices.append(choice_data)
                 continue
@@ -1556,6 +1559,8 @@ class OpenAIServingChat(OpenAIServing):
                 and request.tool_choice == "required"
                 and output.finish_reason == "stop"
             )
+            
+            entropy = output.entropy
 
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
@@ -1570,6 +1575,7 @@ class OpenAIServingChat(OpenAIServing):
                 token_ids=(
                     as_list(output.token_ids) if request.return_token_ids else None
                 ),
+                entropy=entropy,
             )
             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 

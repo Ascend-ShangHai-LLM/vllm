@@ -123,6 +123,7 @@ class SamplerOutput:
     # PLACEHOLDER_TOKEN_ID (-1 by default) is used for padding.
     sampled_token_ids: torch.Tensor
     logprobs_tensors: LogprobsTensors | None
+    entropy: torch.Tensor | None
 
 
 T = TypeVar("T")
@@ -252,6 +253,8 @@ class ModelRunnerOutput:
 
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
+    
+    entropy: torch.Tensor | None = None
 
 
 # ModelRunnerOutput wrapper for async scheduling.

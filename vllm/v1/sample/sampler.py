@@ -71,6 +71,7 @@ class Sampler(nn.Module):
         predict_bonus_token: bool = False,
         logprobs_mode_override: LogprobsMode | None = None,
     ) -> SamplerOutput:
+        entropy = None
         logprobs_mode = logprobs_mode_override or self.logprobs_mode
         # NOTE(woosuk): Use the original logits (before any penalties or
         # temperature scaling) for the top-k logprobs.
@@ -79,7 +80,7 @@ class Sampler(nn.Module):
         num_logprobs = sampling_metadata.max_num_logprobs
         if num_logprobs is not None:
             if logprobs_mode == "raw_logprobs":
-                raw_logprobs = self.compute_logprobs(logits)
+                raw_logprobs, entropy = self.compute_logprobs(logits)
             elif logprobs_mode == "raw_logits":
                 if logits.dtype == torch.float32:
                     raw_logprobs = logits.clone()
@@ -125,6 +126,7 @@ class Sampler(nn.Module):
             # token per request.
             sampled_token_ids=sampled.unsqueeze(-1),
             logprobs_tensors=logprobs_tensors,
+            entropy=entropy,
         )
         return sampler_output
 
@@ -204,6 +206,12 @@ class Sampler(nn.Module):
 
     @staticmethod
     def compute_logprobs(logits: torch.Tensor) -> torch.Tensor:
+        import os
+        if os.getenv("RETURN_ENTROPY", "0") == "1":
+            probs = logits.softmax(dim=-1, dtype=torch.float32)
+            logprobs = logits.log_softmax(dim=-1, dtype=torch.float32)
+            entropy = -torch.nansum(probs * logprobs, dim=-1)
+            return logprobs, entropy
         return logits.log_softmax(dim=-1, dtype=torch.float32)
 
     @staticmethod
