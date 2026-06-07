@@ -35,6 +35,7 @@ class CompletionOutput:
             to stop, None if the completion finished for some other reason
             including encountering the EOS token.
         lora_request: The LoRA request that was used to generate the output.
+        entropy: Per-token entropy values for this completion.
     """
 
     index: int
@@ -46,6 +47,7 @@ class CompletionOutput:
     finish_reason: str | None = None
     stop_reason: int | str | None = None
     lora_request: LoRARequest | None = None
+    entropy: list[float] | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None

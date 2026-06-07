@@ -274,6 +274,7 @@ class RequestState:
         stop_reason: int | str | None,
         kv_transfer_params: dict[str, Any] | None = None,
         routed_experts: np.ndarray | None = None,
+        entropy: list[float] | None = None,
     ) -> RequestOutput | PoolingRequestOutput | None:
         finished = finish_reason is not None
         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
@@ -315,7 +316,7 @@ class RequestState:
             )
 
         output = self._new_completion_output(
-            new_token_ids, finish_reason, stop_reason, routed_experts
+            new_token_ids, finish_reason, stop_reason, routed_experts, entropy
         )
 
         if self.parent_req is None:
@@ -379,6 +380,7 @@ class RequestState:
         finish_reason: FinishReason | None,
         stop_reason: int | str | None,
         routed_experts: np.ndarray | None = None,
+        entropy: list[float] | None = None,
     ) -> CompletionOutput:
         assert self.detokenizer is not None
         assert self.logprobs_processor is not None
@@ -404,6 +406,7 @@ class RequestState:
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None,
+            entropy=entropy,
         )
 
     def _new_pooling_output(self, pooling_output: torch.Tensor) -> PoolingOutput:
@@ -429,6 +432,7 @@ class OutputProcessor:
         self.external_req_ids: defaultdict[str, list[str]] = defaultdict(list)
         self.lora_states = LoRARequestStates(log_stats)
         self.tracing_enabled = tracing_enabled
+        self.entropy_dict: dict[str, list[float]] = {}
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
@@ -478,6 +482,7 @@ class OutputProcessor:
         request_ids_to_abort = []
         for request_id in internal_req_ids:
             req_state = self.request_states.pop(request_id, None)
+            self.entropy_dict.pop(request_id, None)
             if req_state is not None:
                 self.lora_states.request_finished(request_id, req_state.lora_name)
                 request_ids_to_abort.append(request_id)
@@ -617,6 +622,10 @@ class OutputProcessor:
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
             routed_experts = engine_core_output.routed_experts
+            entropy = engine_core_output.entropy
+            if entropy is not None:
+                entropy_values = entropy.reshape(-1).tolist()
+                self.entropy_dict.setdefault(req_id, []).extend(entropy_values)
 
             if req_state.is_prefilling:
                 if engine_core_output.prefill_stats is not None:
@@ -648,6 +657,7 @@ class OutputProcessor:
                 stop_reason,
                 kv_transfer_params,
                 routed_experts,
+                self.entropy_dict.get(req_id),
             ):
                 if req_state.streaming_input:
                     request_output.finished = False
@@ -689,6 +699,7 @@ class OutputProcessor:
     def _finish_request(self, req_state: RequestState) -> None:
         req_id = req_state.request_id
         self.request_states.pop(req_id)
+        self.entropy_dict.pop(req_id, None)
 
         internal_ids = self.external_req_ids[req_state.external_req_id]
         internal_ids.remove(req_id)

@@ -1246,6 +1246,7 @@ class OpenAIServingChat(OpenAIServing):
                     token_ids=(
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
+                    entropy=output.entropy,
                 )
                 choices.append(choice_data)
                 continue
@@ -1467,6 +1468,7 @@ class OpenAIServingChat(OpenAIServing):
                 token_ids=(
                     as_list(output.token_ids) if request.return_token_ids else None
                 ),
+                entropy=output.entropy,
             )
             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 

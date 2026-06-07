@@ -92,6 +92,7 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     # not part of the OpenAI spec but is useful for tracing the tokens
     # in agent scenarios
     token_ids: list[int] | None = None
+    entropy: list[float] | None = None
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
