@@ -228,6 +228,9 @@ class EngineCore:
         # environment variable overrides after this point)
         enable_envs_cache()
 
+        self._last_log_time = None
+        self._log_interval = int(os.getenv("VLLM_MONITOR_INTERVAL", "10"))
+
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
         start = time.time()
@@ -1168,6 +1171,23 @@ class EngineCoreProc(EngineCore):
             self._process_input_queue()
             # 2) Step the engine core and return the outputs.
             self._process_engine_step()
+
+            if os.getenv("VLLM_MONITOR", "0") == "1":
+                now = time.time()
+                if self._last_log_time is None:
+                    self._last_log_time = now
+                if now - self._last_log_time >= self._log_interval:
+                    logger.info(
+                            f"avg_P_bs: {self.scheduler.avg_P_bs:.2f}, avg_P_tokens: {self.scheduler.avg_P_tokens:.2f}, avg_P_tgs: {self.scheduler.avg_P_tgs:.2f}, "
+                            f"P_bs: {self.scheduler.P_bs}, P_tokens: {self.scheduler.P_tokens}, "
+                            f"P_times: {self.scheduler.P_times}, P_duration: {self.scheduler.P_duration:.4f}, "
+                            f"avg_D_bs: {self.scheduler.avg_D_bs:.2f}, avg_D_tps: {self.scheduler.avg_D_tgs:.2f}, D_bs: {self.scheduler.D_bs}, "
+                            f"D_tokens: {self.scheduler.D_tokens}, D_times: {self.scheduler.D_times}, D_duration: {self.scheduler.D_duration:.4f}, "
+                            f"PD_times: {self.scheduler.PD_times}, PD_duration: {self.scheduler.PD_duration:.4f}, "
+                            f"R_bs: {self.scheduler.R_bs}, R_tokens: {self.scheduler.R_tokens}, R_times: {self.scheduler.R_times}, R_duration: {self.scheduler.R_duration:.4f}, "
+                            f"KV_avg: {self.scheduler.kv_cache_usage_accu/self.scheduler.kv_cache_usage_times*100:.2f}%, KV_max: {self.scheduler.kv_cache_usage_max*100:.2f}%"
+                    )
+                    self._last_log_time = now
 
         raise SystemExit
 

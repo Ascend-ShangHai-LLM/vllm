@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 import time
+import os
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import replace
@@ -298,6 +299,35 @@ class Scheduler(SchedulerInterface):
             )
 
         self._pause_state: PauseState = PauseState.UNPAUSED
+
+        #VLLM MONITOR
+        if os.getenv("VLLM_MONITOR_STATS", "0") == "1":
+            self.P_bs: int = 0
+            self.P_tokens: int = 0
+            self.D_bs: int = 0
+            self.D_tokens: int = 0
+            self.R_bs: int = 0
+            self.R_tokens: int = 0
+
+            self.P_duration: float = 0
+            self.D_duration: float = 0
+            self.PD_duration: float = 0
+            self.R_duration: float = 0
+
+            self.P_times: int = 0
+            self.D_times: int = 0
+            self.PD_times: int = 0
+            self.R_times: int = 0
+
+            self.kv_cache_usage_accu: float = 0.0
+            self.kv_cache_usage_times: float = 0
+            self.kv_cache_usage_max: float = 0.0
+
+            self.avg_P_bs: float = 0.0
+            self.avg_P_tokens: float = 0.0
+            self.avg_P_tgs: float = 0.0
+            self.avg_D_bs: float = 0.0
+            self.avg_D_tgs: float = 0.0
 
     def _mamba_block_aligned_split(
         self,
@@ -907,6 +937,32 @@ class Scheduler(SchedulerInterface):
             else None
         )
 
+        monitor_stats = None
+        if os.getenv("VLLM_MONITOR", "0") == "1":
+            monitor_stats = [0, 0, 0, 0, 0, 0] #P_bs, P_tokens, D_bs, D_tokens, R_bs, R_tokens
+
+            for req in scheduled_new_reqs:
+                monitor_stats[0] += 1
+                monitor_stats[1] += num_scheduled_tokens[req.request_id]
+                self.requests[req.request_id].prefix_cache_hit_tokens = req.num_computed_tokens
+                self.requests[req.request_id].prefix_cache_hit_ratio = req.num_computed_tokens / req.num_prompt_tokens
+            for req in scheduled_running_reqs:
+                if num_scheduled_tokens[req.request_id] > 1:
+                    monitor_stats[0] += 1
+                    monitor_stats[1] += num_scheduled_tokens[req.request_id]
+                    self.requests[req.request_id].prefix_cache_hit_tokens = req.num_computed_tokens
+                    self.requests[req.request_id].prefix_cache_hit_ratio = req.num_computed_tokens / req.num_prompt_tokens
+                else:
+                    monitor_stats[2] += 1
+                    monitor_stats[3] += num_scheduled_tokens[req.request_id]
+            for req in scheduled_resumed_reqs:
+                monitor_stats[4] += 1
+                monitor_stats[5] += num_scheduled_tokens[req.request_id]
+                self.requests[req.request_id].recompute_tokens = num_scheduled_tokens[req.request_id]
+                self.requests[req.request_id].prefix_cache_hit_tokens = req.num_computed_tokens
+                self.requests[req.request_id].prefix_cache_hit_ratio = req.num_computed_tokens / len(req.all_token_ids)
+            
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -923,6 +979,7 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
+            monitor_stats=monitor_stats,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -970,6 +1027,40 @@ class Scheduler(SchedulerInterface):
 
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
+
+    def _update_monitor_stats(self, monitor_stats):
+        P_bs, P_tokens, D_bs, D_tokens, R_bs, R_tokens, duration = monitor_stats
+        if R_bs:
+            self.R_duration += duration
+            self.R_times += 1
+        elif P_bs and D_bs:
+            self.PD_duration += duration
+            self.PD_times += 1
+        elif D_bs:
+            self.D_duration += duration
+            self.D_times += 1
+        elif P_bs:
+            self.P_duration += duration
+            self.P_times += 1
+
+        self.P_bs += P_bs
+        self.P_tokens += P_tokens
+        self.D_bs += D_bs
+        self.D_tokens += D_tokens
+        self.R_bs += R_bs
+        self.R_tokens += R_tokens
+
+        if self.P_times > 0:
+            self.avg_P_bs = self.P_bs / (self.P_times + self.PD_times)
+            self.avg_P_tokens = self.P_tokens / (self.P_times + self.PD_times)
+            self.avg_P_tgs = self.P_tokens / (self.P_duration + self.PD_duration)
+        if self.D_times > 0:
+            self.avg_D_bs = self.D_bs / (self.D_times + self.PD_times)
+            self.avg_D_tgs = self.D_tokens / (self.D_duration + self.PD_duration)
+
+        self.kv_cache_usage_accu += self.kv_cache_manager.usage
+        self.kv_cache_usage_times += 1
+        self.kv_cache_usage_max = max(self.kv_cache_manager.usage, self.kv_cache_usage_max)
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER
@@ -1301,6 +1392,12 @@ class Scheduler(SchedulerInterface):
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
         entropy = model_runner_output.entropy
+
+        #VLLM_MONITOR
+        monitor_stats = model_runner_output.monitor_stats
+        if monitor_stats is not None:
+            monitor_stats.append(model_runner_output.duration)
+            self._update_monitor_stats(monitor_stats)
 
         perf_stats: PerfStats | None = None
         if self.perf_metrics and self.perf_metrics.is_enabled():
